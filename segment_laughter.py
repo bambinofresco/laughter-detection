@@ -1,10 +1,14 @@
 # Example usage:
 # python segment_laughter.py --input_audio_file=tst_wave.wav --output_dir=./tst_wave --save_to_textgrid=False --save_to_audio_files=True --min_length=0.2 --threshold=0.5
 
+# Import statements
+
 import os, sys, pickle, time, librosa, argparse, torch, numpy as np, pandas as pd, scipy
 from tqdm import tqdm
 import tgt
 if __name__ == '__main__':
+
+    # ML Model import statements
     sys.path.append('./utils/')
     import laugh_segmenter
     import models, configs
@@ -13,17 +17,84 @@ if __name__ == '__main__':
     from torch import optim, nn
     from functools import partial
     from distutils.util import strtobool
-###
+
+    # File mover + renamer utilities
     import os
     import shutil
+    import re
 
-###
-    import tkinter as tk
-    from tkinter import filedialog
+    # Local file import
+    from tkinter import Tk
+    from tkinter.filedialog import askopenfilename
 
-    root = tk.Tk()
-    root.withdraw()
+    # YouTube Downloader Utility
+    import yt_dlp
+    from yt_dlp import YoutubeDL
 
+    # Asks user for the import type, then the URL if necessary
+    import_Type = input("You importing a YouTube link or local file, G? \n Type Y for YouTube, L for local \n")
+
+    # Initialize the datAudioPath and datTextGridPath variable
+    datAudioPath = None
+    datTextGridPath = None
+
+    # Filename sanitzer function
+    def sanitize_filename(filename):
+        # Remove special characters, but keep spaces
+        sanitized = re.sub(r'[^\w\s]', '', filename).strip()
+        return sanitized
+
+    # Grabs some info from the video, sets the AudioPath it will be downloaded to later
+    if import_Type == 'Y':
+        URLS = input("What that URL is, player?")
+        with YoutubeDL() as ydl:
+            info_dict = ydl.extract_info(URLS, download=False)
+            video_url = info_dict.get("url", None)
+            video_id = info_dict.get("id", None)
+            video_title = info_dict.get('title', None)                      # Gets title
+            title_clean = re.sub('[^a-zA-Z0-9 \n\.]', '', video_title)      # Removes specials chars
+            title_clean = sanitize_filename(title_clean)
+            datAudioPath = "F:\\Clipping Channel\\Queue\\" + title_clean + ".mp3" # Save location of audio for analysis
+            datTextGridPath = "F:\\Clipping Channel\\Episodes\\" + title_clean + "\\"       # Save location of textgrid
+            videoPath = 'F:\\Clipping Channel\\Episodes\\' + title_clean + '\\%(title)s.%(ext)s'
+            print("Dat audio path: " + datAudioPath)
+
+        # Options for downloading the video file with audio and video
+        video_ydl_opts = {
+            'format_sort': ['res:1080', 'ext:mp4:m4a'],
+            'outtmpl': videoPath,
+        }
+
+        # Options for downloading the audio-only file
+        audio_ydl_opts = {
+            'format': 'm4a/bestaudio/best',
+            'outtmpl': datAudioPath,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+            }]
+        }
+
+        # Downloads the video
+        with yt_dlp.YoutubeDL(video_ydl_opts) as video_ydl:
+            video_error_code = video_ydl.download(URLS)
+
+        with yt_dlp.YoutubeDL(audio_ydl_opts) as audio_ydl:
+            audio_error_code = audio_ydl.download(URLS)
+    else:
+        # Hide the tkinter root window
+        root = Tk()
+        root.withdraw()
+
+        # Prompt the user to select a local file
+        local_file_path = askopenfilename()
+        if local_file_path:
+            print(f"Local file path: {local_file_path}")
+            datAudioPath = local_file_path
+            # Define the TextGrid path based on the local file's directory
+            datTextGridPath = os.path.dirname(local_file_path)
+        else:
+            print("No file was selected.")
 
 ###
     sample_rate = 8000
@@ -44,12 +115,12 @@ if __name__ == '__main__':
 
     model_path = args.model_path
     config = configs.CONFIG_MAP[args.config]
-    audio_path = filedialog.askopenfilename()
+    audio_path = datAudioPath
     threshold = float(args.threshold)
     min_length = float(args.min_length)
     save_to_audio_files = bool(strtobool(args.save_to_audio_files))
     save_to_textgrid = bool(strtobool(args.save_to_textgrid))
-    output_dir = args.output_dir
+    output_dir = datTextGridPath
 
     device = torch.device('cuda')
     # if torch.cuda.is_available() else 'cpu'
@@ -120,16 +191,43 @@ if __name__ == '__main__':
                 print(laugh_segmenter.format_outputs(instances, wav_paths))
 
         if save_to_textgrid:
+
             laughs = [{'start': i[0], 'end': i[1]} for i in instances]
             tg = tgt.TextGrid()
             laughs_tier = tgt.IntervalTier(name='laughter', objects=[
             tgt.Interval(l['start'], l['end'], 'laugh') for l in laughs])
             tg.add_tier(laughs_tier)
             fname = os.path.splitext(os.path.basename(audio_path))[0]
-            tgt.write_to_file(tg, os.path.join(output_dir, fname + '_laughter.TextGrid'))
+            fname_clean = re.sub('[^a-zA-Z0-9 \n\.]', '', fname)
+            tgPath = os.path.join(output_dir, f"{fname_clean}_tg.TextGrid")
+            txtPath = os.path.join(output_dir, f"{fname_clean}.txt")
+            print(f"output_dir: {output_dir}")
+            print(f"fname_clean: {fname_clean}")
+            print(f"tgPath: {tgPath}")
+            tgt.write_to_file(tg, os.path.join(tgPath))
+            if os.path.isfile(tgPath):
+                print("TextGrid file created successfully.")
+            else:
+                print("TextGrid file creation failed.")
+
+            def tabulate_textgrid(tgPath):
+                textgrid = tgt.io.read_textgrid(tgPath)
+                interval_tier = textgrid.get_tier_by_name("laughter")
+                intervals = interval_tier.intervals
+                with open(txtPath, "w") as f:
+                    f.write("tmin\ttext\ttext\ttmax\n")
+                    for interval in intervals:
+                        f.write(f"{interval.start_time}\t{interval_tier.name}\t{interval.text}\t{interval.end_time}\n")
+
+
+            tabulate_textgrid(tgPath)
 
             print('Saved laughter segments in {}'.format(
-                os.path.join(output_dir, fname + '_laughter.TextGrid')))
-            os.rename(audio_path, "F:\Clipping Channel\Raw Episodes\\audio\Processed\\" +fname +".mp3")
-            os.replace(audio_path, "F:\Clipping Channel\Raw Episodes\\audio\Processed\\" +fname +".mp3")
-            shutil.move(audio_path, "F:\Clipping Channel\Raw Episodes\\audio\Processed\\" +fname +".mp3")
+                os.path.join(output_dir, fname_clean + '_tg.TextGrid')))
+            # Check if the user selected a YouTube link
+            if import_Type == 'Y':
+                os.rename(audio_path, "F:\\Clipping Channel\\Episodes\\" + title_clean + "\\" + fname + ".mp3")
+            # Else, handle local file renaming or skipping the operation
+            else:
+                print("Thanks, big dog. Enjoy that files.")
+        # Your code to handle local file renaming (if needed)
